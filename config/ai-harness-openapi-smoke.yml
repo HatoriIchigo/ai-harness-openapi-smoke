@@ -1,0 +1,75 @@
+# ai-harness-openapi-smoke 設定ファイル
+# 配置先: <プロジェクトルート>/.claude/harness/config/ai-harness-openapi-smoke.yml
+# ai-harness-main --fire ai-harness-openapi-smoke から手動で起動する能動スキャン専用（hook では発火しない）。
+# OpenAPI 仕様の各 operation へ実リクエストを投げ、正常系（happy path）の疎通を確認する。
+
+# OpenAPI 仕様（YAML / JSON）。プロジェクトルートからの相対パス。
+spec: docs/openapi.yaml
+
+# テスト対象バックエンドのベース URL。既に応答していれば startup は実行しない。
+base_url: http://localhost:3000
+
+# 全リクエスト共通で付与するヘッダ（省略可）。
+headers:
+  Authorization: "Bearer dev-token"
+
+# リクエストタイムアウト秒（省略可・既定 10）。
+timeout_seconds: 10
+
+# base_url が無応答のときだけ使うフォールバック起動（省略可）。
+# 先頭から順に試し、wait 秒生存すれば採用（venv のレイアウト差等の環境依存を吸収する用途）。
+# 採用したプロセスはこの harness が起動した分だけを Fire 完了時に停止する（既に動いていたものは触らない）。
+# シェルを経由せず直接 exec するため、パイプ・リダイレクト等の複雑なシェル構文は書けない。
+# startup:
+#   cmd:
+#     - ./venv/bin/python3 -m uvicorn main:app --host 0.0.0.0
+#     - ./venv/Scripts/python -m uvicorn main:app --host 0.0.0.0
+#   wait: 10
+#   cwd: backend   # 省略可（既定はプロジェクトルート）
+
+# overrides の init/catch/final で sql を使うなら必須（省略可＝sql 未使用時は不要）。
+# username/password はリテラルでも ${VAR_NAME} 形式の環境変数参照でもよい。
+# sql:
+#   driver: postgres   # postgres | mysql
+#   host: localhost
+#   port: 5432          # 省略可（driver の既定ポート）
+#   database: myapp_test
+#   username: postgres
+#   password: "${DB_PASSWORD}"
+
+# example が無い operation、または example を上書きしたい operation の指定（省略可）。
+# method + path（仕様の paths キーそのまま。例: /users/{id}）で対象の operation に紐付ける。
+overrides:
+  - method: GET
+    path: /users/{id}
+    path_params:
+      id: "1"
+    expected_status: 200
+    # init:                 # リクエスト送信前（省略可）。init 失敗時は実リクエストを送らず NG。
+    #   cmd:
+    #     - some setup command
+    #   sql:
+    #     query: "SELECT COUNT(*) FROM users WHERE id = 1"
+    #     result: "1"
+    # catch:                # この operation が失敗したときだけ実行（省略可）
+    #   cmd:
+    #     - some cleanup-on-failure command
+    # final:                # 成功でも失敗でも必ず実行（省略可）
+    #   cmd:
+    #     - some cleanup command
+
+  - method: POST
+    path: /users
+    body:
+      name: smoke-test
+      email: smoke-test@example.com
+    expected_status: 201
+
+# 判定基準:
+#   - ステータスコード: expected_status（override 優先）、無ければ仕様の 2xx レスポンスのうち最小のもの。
+#   - レスポンスボディ: 該当ステータスの application/json スキーマに対する構造チェック
+#     （type / required / properties / items の再帰照合。pattern・format 等のフル JSON Schema 検証は対象外）。
+#
+# 値の優先順位: overrides の指定 > 仕様の example > スキーマの example。
+# 必須パラメータ・必須リクエストボディ・2xx レスポンス定義のいずれかが解決できない operation は
+# （値を合成しないため）スキップされ、失敗としては扱われない。

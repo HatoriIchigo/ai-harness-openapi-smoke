@@ -1,0 +1,4 @@
+# ai-harness-openapi-smoke 設定ファイル（有効化時に自動生成された雛形）。
+# spec / base_url を実プロジェクトの値に書き換えてから ai-harness-main --fire で実行してください。
+spec: "__ai_harness_placeholder__/openapi.yaml"
+base_url: "http://localhost:0"
