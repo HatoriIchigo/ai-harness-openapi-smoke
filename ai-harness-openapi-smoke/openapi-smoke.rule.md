@@ -1,41 +1,65 @@
 ---
 paths:
   - .claude/harness/config/ai-harness-openapi-smoke.yml
-  - "**/openapi.yaml"
-  - "**/openapi.yml"
-  - "**/openapi.json"
 ---
 
 ## 概要
 
-このプロジェクトには ai-harness-openapi-smoke（OpenAPI 仕様を元にバックエンドへ実リクエストを送り、
-正常系（happy path）の疎通を確認する ai-harness プラグイン）が導入されている。hook では発火せず、
-`ai-harness-main --fire ai-harness-openapi-smoke` で手動実行する。
+ai-harness-openapi-smoke は hook では発火せず、`ai-harness-main --fire ai-harness-openapi-smoke` から
+手動起動する能動スキャン専用プラグイン。OpenAPI 仕様の各 operation（`paths` × method）へ実際に HTTP
+リクエストを送り、正常系（happy path）の疎通を確認する。値の優先順位は `overrides` > 仕様の
+`example`/`examples` > スキーマの `example`。解決できない必須項目がある operation は値を合成せず
+スキップする（失敗ではない）。判定はステータスコード（`expected_status` か仕様の最小 2xx）とレスポンス
+ボディの構造（`type`/`required`/`properties`/`items` の再帰照合のみ）。
 
-## OpenAPI 仕様・エンドポイントを追加・変更するときの注意
+- `spec` … OpenAPI 仕様（YAML/JSON・プロジェクトルート相対）
+- `base_url` … テスト対象バックエンドのベース URL
+- `headers` … 全リクエスト共通ヘッダ（省略可）
+- `timeout_seconds` … リクエストタイムアウト秒（省略可・既定 10）
+- `startup.cmd` / `startup.wait` / `startup.cwd` … `base_url` 無応答時だけ使うフォールバック起動
+  （先頭から順に試し、`wait` 秒生存すれば採用）。既に応答していれば実行も停止もしない
+- `sql` … `overrides` の `init`/`catch`/`final` で sql を使うなら必須の接続設定
+  （`driver`: postgres/mysql、`host`/`port`/`database`/`username`/`password`。
+  `username`/`password` は `${VAR_NAME}` で環境変数参照可）
+- `overrides[].method` / `path` … 仕様の `paths` キーと method+path で紐付け
+- `overrides[].path_params` / `query` / `headers` / `body` / `expected_status` … 仕様の example を上書き
+- `overrides[].init` / `catch` / `final` … `cmd`（順次実行）と `sql`（クエリ結果のアサーション）。
+  `init` はリクエスト前（失敗なら実リクエストを送らず NG）、`catch` は失敗時のみ、`final` は常に実行
 
-各 operation（`paths` × method）のリクエストは、値の優先順位
-**設定の `overrides`（method+path で紐付け） > 仕様の `example`/`examples` > スキーマの `example`**
-で自動的に組み立てられる。必須パラメータ・必須リクエストボディ・2xx レスポンス定義のいずれかについて
-値を解決できない operation は、**値を合成せず黙ってスキップ**される（失敗にはならない＝レポートに
-「NG」は出ない）。
+設定不正・仕様が読めない場合は exit 2（検出。hook のゲートではないためブロックではなくレポート）。
 
-新しい operation を追加したとき、このテストで実際にカバーしたいなら次のいずれかが必要:
+## 設定ファイル
 
-- 仕様側に `example`（パスパラメータ・クエリパラメータ・リクエストボディ）を書く、または
-- `.claude/harness/config/ai-harness-openapi-smoke.yml` の `overrides` に、`method` + `path`
-  （仕様の `paths` キーそのまま。例: `/users/{id}`）で紐付けたエントリを追加する。
+`.claude/harness/config/ai-harness-openapi-smoke.yml`
 
-どちらも無い operation は「スキップ」扱いになり、レポート上は成功でも失敗でもない（＝実は一度も
-テストされていない）ことに注意する。判定は expected_status（既定は仕様の 2xx の最小値）とレスポンス
-ボディの構造（`type`/`required`/`properties`/`items` のみ。`pattern`/`format` 等は対象外）。
+```yaml
+spec: docs/openapi.yaml
+base_url: http://localhost:3000
 
-## その他の設定
+startup:
+  cmd:
+    - ./venv/bin/python3 -m uvicorn main:app --host 0.0.0.0
+    - ./venv/Scripts/python -m uvicorn main:app --host 0.0.0.0
+  wait: 10
 
-- `startup`: `base_url` が無応答のときだけ使うフォールバック起動コマンド（`cmd`・`wait`・`cwd`）。
-  既に応答していれば実行されない。
-- `overrides[].init`/`catch`/`final`: `cmd`（順次実行）・`sql`（クエリ結果のアサーション）による
-  テスト前後のセットアップ／後始末。`sql` を使うならトップレベルの `sql`（接続設定。PostgreSQL/MySQL）
-  が必須。
+sql:
+  driver: postgres
+  host: localhost
+  database: myapp_test
+  username: postgres
+  password: "${DB_PASSWORD}"
 
-詳細は `ai-harness-openapi-smoke/README.md` を参照。
+overrides:
+  - method: GET
+    path: /users/{id}
+    path_params:
+      id: "1"
+    expected_status: 200
+    init:
+      sql:
+        query: "SELECT COUNT(*) FROM users WHERE id = 1"
+        result: "1"
+    final:
+      cmd:
+        - some cleanup command
+```
