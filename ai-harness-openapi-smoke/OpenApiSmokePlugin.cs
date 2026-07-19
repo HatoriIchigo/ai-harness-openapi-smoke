@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using ai_harness_baselib;
 using Microsoft.OpenApi;
 
@@ -15,7 +14,7 @@ namespace ai_harness_openapi_smoke;
 ///
 /// 各 operation について、値の優先順位は override（設定の <c>overrides</c>） &gt; 仕様の example &gt;
 /// スキーマの example。必須パラメータ・必須リクエストボディ・2xx レスポンス定義のいずれかが解決できない
-/// operation は「値を合成しない」方針のためスキップする（失敗ではない）。
+/// operation は「値を合成しない」方針のため、実リクエストは送らず<b>失敗（NG）</b>として報告する。
 ///
 /// 判定はステータスコード（2xx のうち最小のものを既定の期待値とする） &amp; レスポンスボディのスキーマ照合
 /// （<see cref="SchemaValidator"/>。type／required／properties／items の構造チェックのみ）。
@@ -81,8 +80,20 @@ public sealed class OpenApiSmokePlugin : PluginBase
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(config.TimeoutSeconds) };
 
+        var auth = AuthResolver.ResolveAll(http, config.BaseUrl, spec.Document.Components, config.Auth);
+        foreach (var log in auth.Logs)
+        {
+            yield return LogEntry.Info(log);
+        }
+        // auth のログインで得た値が既定（ベース）で、明示的な headers 設定がある場合はそちらを優先する。
+        var defaultHeaders = new Dictionary<string, string>(auth.Headers, StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in config.Headers)
+        {
+            defaultHeaders[k] = v;
+        }
+        var documentSecurity = (spec.Document.Security as IReadOnlyList<OpenApiSecurityRequirement>) ?? [];
+
         var passed = new List<string>();
-        var skipped = new List<string>();
         var failed = new List<FailureDetail>();
 
         try
@@ -103,50 +114,55 @@ public sealed class OpenApiSmokePlugin : PluginBase
                         string.Equals(o.Method, method.Method, StringComparison.OrdinalIgnoreCase)
                         && string.Equals(o.Path, pathKey, StringComparison.Ordinal));
 
-                    var (plan, skipReason) = RequestPlanner.Build(
-                        pathKey, method, pathItem.Parameters ?? [], operation, overrideEntry, config.Headers);
+                    var (plan, buildError) = RequestPlanner.Build(
+                        pathKey, method, pathItem.Parameters ?? [], operation, documentSecurity,
+                        overrideEntry, defaultHeaders, auth.Query);
 
-                    if (skipReason is not null)
+                    Uri? uri = null;
+                    var stageError = buildError;
+                    if (stageError is null)
                     {
-                        yield return LogEntry.Debug($"スキップ: {label}（{skipReason}）");
-                        skipped.Add(label);
-                        continue;
-                    }
-
-                    var built = plan!;
-                    var (uri, uriError) = BuildUri(config.BaseUrl, built.PathTemplate, built.PathParams, built.Query);
-                    if (uriError is not null)
-                    {
-                        yield return LogEntry.Warning($"スキップ: {label}（{uriError}）");
-                        skipped.Add(label);
-                        continue;
+                        var (builtUri, uriError) = UrlBuilder.Build(
+                            config.BaseUrl, plan!.PathTemplate, plan.PathParams, plan.Query);
+                        uri = builtUri;
+                        stageError = uriError;
                     }
 
                     bool operationFailed;
                     FailureDetail? failureDetail;
 
-                    var initResult = RunHook(overrideEntry?.Init, config, projectRoot);
-                    if (!initResult.Ok)
+                    if (stageError is not null)
                     {
-                        var msg = $"init 失敗: {initResult.Error}";
-                        yield return LogEntry.Warning($"NG: {label}（{msg}）");
-                        failureDetail = new FailureDetail(label, [msg]);
+                        yield return LogEntry.Warning($"NG: {label}（{stageError}）");
+                        failureDetail = new FailureDetail(label, [stageError]);
                         operationFailed = true;
                     }
                     else
                     {
-                        var outcome = SendAndValidate(http, label, built, uri!, operation);
-                        if (outcome.Failure is { } failure)
+                        var initResult = RunHook(overrideEntry?.Init, config, projectRoot);
+                        if (!initResult.Ok)
                         {
-                            yield return LogEntry.Warning($"NG: {label}（{string.Join("; ", failure.Violations)}）");
-                            failureDetail = failure;
+                            var msg = $"init 失敗: {initResult.Error}";
+                            yield return LogEntry.Warning($"NG: {label}（{msg}）");
+                            failureDetail = new FailureDetail(label, [msg]);
                             operationFailed = true;
                         }
                         else
                         {
-                            yield return LogEntry.Info($"ok: {label} -> {outcome.ActualStatus}");
-                            failureDetail = null;
-                            operationFailed = false;
+                            var outcome = SendAndValidate(http, label, plan!, uri!, operation);
+                            if (outcome.Failure is { } failure)
+                            {
+                                yield return LogEntry.Warning(
+                                    $"NG: {label}（{string.Join("; ", failure.Violations)}）");
+                                failureDetail = failure;
+                                operationFailed = true;
+                            }
+                            else
+                            {
+                                yield return LogEntry.Info($"ok: {label} -> {outcome.ActualStatus}");
+                                failureDetail = null;
+                                operationFailed = false;
+                            }
                         }
                     }
 
@@ -171,8 +187,7 @@ public sealed class OpenApiSmokePlugin : PluginBase
             BackendLauncher.Stop(backend.Owned);
         }
 
-        yield return LogEntry.Info(
-            $"完了: 成功 {passed.Count} 件 / 失敗 {failed.Count} 件 / スキップ {skipped.Count} 件");
+        yield return LogEntry.Info($"完了: 成功 {passed.Count} 件 / 失敗 {failed.Count} 件");
 
         if (failed.Count == 0)
         {
@@ -180,7 +195,7 @@ public sealed class OpenApiSmokePlugin : PluginBase
         }
 
         result.ExitCode = 2;
-        result.Reason = BuildFailureReason(failed, skipped.Count, passed.Count);
+        result.Reason = BuildFailureReason(failed, passed.Count);
     }
 
     /// <summary>
@@ -323,52 +338,16 @@ public sealed class OpenApiSmokePlugin : PluginBase
         string.Equals(name, "Content-Type", StringComparison.OrdinalIgnoreCase)
         || string.Equals(name, "Content-Length", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// <paramref name="pathTemplate"/> の <c>{param}</c> を <paramref name="pathParams"/> で埋め、
-    /// <paramref name="baseUrl"/> に対する絶対 URL を組み立てる（query 付き）。
-    /// </summary>
-    private static (Uri? Uri, string? Error) BuildUri(
-        string baseUrl, string pathTemplate,
-        IReadOnlyDictionary<string, string> pathParams, IReadOnlyDictionary<string, string> query)
-    {
-        var resolvedPath = Regex.Replace(pathTemplate, @"\{([^{}]+)\}", m =>
-            pathParams.TryGetValue(m.Groups[1].Value, out var v) ? Uri.EscapeDataString(v) : m.Value);
-        if (resolvedPath.Contains('{'))
-        {
-            return (null, $"パステンプレートに未解決のプレースホルダが残る: {resolvedPath}");
-        }
-
-        Uri combined;
-        try
-        {
-            var baseUri = new Uri(baseUrl.TrimEnd('/') + "/");
-            combined = new Uri(baseUri, resolvedPath.TrimStart('/'));
-        }
-        catch (Exception e)
-        {
-            return (null, $"URL を組み立てられない: {e.Message}");
-        }
-
-        if (query.Count == 0)
-        {
-            return (combined, null);
-        }
-        var qs = string.Join(
-            "&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-        var builder = new UriBuilder(combined) { Query = qs };
-        return (builder.Uri, null);
-    }
-
     /// <summary>失敗 1 件（operation ラベルと違反理由の一覧）。</summary>
     private sealed record FailureDetail(string Label, IReadOnlyList<string> Violations);
 
     private const int MaxReportedFailures = 50;
 
-    private static string BuildFailureReason(IReadOnlyList<FailureDetail> failed, int skippedCount, int passedCount)
+    private static string BuildFailureReason(IReadOnlyList<FailureDetail> failed, int passedCount)
     {
         var sb = new StringBuilder();
         sb.Append("OpenAPI smoke テストで ").Append(failed.Count).Append(" 件失敗しました")
-            .Append("（成功 ").Append(passedCount).Append(" 件 / スキップ ").Append(skippedCount).Append(" 件）:\n");
+            .Append("（成功 ").Append(passedCount).Append(" 件）:\n");
         foreach (var f in failed.Take(MaxReportedFailures))
         {
             sb.Append("- ").Append(f.Label).Append(": ").Append(string.Join("; ", f.Violations)).Append('\n');

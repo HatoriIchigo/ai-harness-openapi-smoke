@@ -37,6 +37,21 @@ timeout_seconds: 10
 #   username: postgres
 #   password: "${DB_PASSWORD}"
 
+# 仕様の security（認証要件）を満たすためのログイン方法（省略可）。
+# 固定トークンで足りるなら上の headers に Authorization を直接書けばよい。ログインしてトークンを
+# 都度取得したい場合はこちら。仕様の components.securitySchemes のキー名ごとに設定する。
+# 取得したトークンの適用先（Authorization ヘッダ／apiKey のヘッダ・クエリ）は仕様のスキーム定義から
+# 自動で導出するため、ここでは指定しない。
+# auth:
+#   bearerAuth:                       # 仕様の components.securitySchemes のキー名
+#     login:
+#       method: POST                  # 省略可・既定 POST
+#       path: /auth/login             # base_url からの相対パス
+#       body:
+#         username: tester
+#         password: "${TEST_PASSWORD}"
+#       token_field: access_token     # レスポンス JSON からトークンを取り出すパス（ドット区切りでネスト可）
+
 # example が無い operation、または example を上書きしたい operation の指定（省略可）。
 # method + path（仕様の paths キーそのまま。例: /users/{id}）で対象の operation に紐付ける。
 overrides:
@@ -71,5 +86,5 @@ overrides:
 #     （type / required / properties / items の再帰照合。pattern・format 等のフル JSON Schema 検証は対象外）。
 #
 # 値の優先順位: overrides の指定 > 仕様の example > スキーマの example。
-# 必須パラメータ・必須リクエストボディ・2xx レスポンス定義のいずれかが解決できない operation は
-# （値を合成しないため）スキップされ、失敗としては扱われない。
+# 必須パラメータ・必須リクエストボディ・2xx レスポンス定義・security（認証要件）のいずれかが解決できない
+# operation は（値を合成しないため）実リクエストを送らず失敗（NG）として扱われる。

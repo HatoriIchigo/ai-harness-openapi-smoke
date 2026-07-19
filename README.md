@@ -12,7 +12,7 @@ hook イベントには一切紐付かない。`ai-harness-main --fire ai-harnes
 2. 仕様の `example` / `examples`
 3. スキーマの `example`
 
-いずれからも値を解決できない**必須**パラメータ・必須リクエストボディがある operation、または 2xx のレスポンス定義が無い operation は、値を合成せずに**スキップ**する（失敗としては扱わない）。
+いずれからも値を解決できない**必須**パラメータ・必須リクエストボディがある operation、2xx のレスポンス定義が無い operation、または仕様の `security`（認証要件）を満たせない operation は、値を合成せず**失敗（NG）**として報告する（実リクエストは送らない）。`security` の詳細は下記「認証（security）」を参照。
 
 ## 判定
 
@@ -102,14 +102,43 @@ override には `init`（リクエスト送信前）・`catch`（この operatio
 
 `sql` チェックを使う override が 1 つでもあれば、トップレベルの `sql`（接続設定）が必須になる（無ければ設定エラーでフェイルクローズ）。`username` / `password` はリテラルでも `${VAR_NAME}` 形式の環境変数参照でもよい（環境変数が未設定なら設定エラー）。
 
+### 認証（security）
+
+仕様の `security`（`operation.security` があればそれを使い、無ければ `document.security` を継承。空配列は「明示的に認証不要」）を、パラメータ・リクエストボディと同じ「解決できなければ NG」の対象として扱う（`SecurityResolver`）。判定は「その operation が要求するスキームの認証情報が、現在解決済みの `headers`/`query` に既にあるか」だけで、認証情報の値そのものは合成しない。
+
+- `http`（bearer/basic）・OAuth2・OpenID Connect → `Authorization` ヘッダの有無
+- `apiKey` → 仕様の `in`/`name` で指定された場所（header/query。cookie はヘッダの有無のみで簡易判定）
+- `mutualTLS` 等、ヘッダ／クエリで表現できない方式は解決不可（常に NG）
+
+固定のトークンで足りるなら、これまで通り `headers`（トップレベルまたは `overrides[].headers`）に `Authorization: "Bearer xxx"` を書けばよい。
+
+**ログインして毎回トークンを取得する場合**は `auth` を設定する。仕様の `components.securitySchemes` のキー名ごとに、ログインリクエストの送り方だけを書く（取得したトークンをどこへ適用するか＝ヘッダ名／クエリ名は仕様のスキーム定義から自動で導出するため、指定不要）。
+
+```yaml
+auth:
+  bearerAuth:                     # 仕様の components.securitySchemes のキー名と一致させる
+    login:
+      method: POST                 # 省略可・既定 POST
+      path: /auth/login            # base_url からの相対パス
+      headers: {}                  # 省略可。ログインリクエスト自体に付けるヘッダ
+      body:
+        username: tester
+        password: "${TEST_PASSWORD}"
+      token_field: data.access_token  # レスポンス JSON からトークンを取り出すパス（ドット区切りでネスト可）
+```
+
+Fire 開始時に一度だけ全 `auth` エントリのログインを実行し、成功したものは以降の全リクエストへ自動適用する（`headers`/`overrides[].headers` で明示的に設定した値がある場合はそちらを優先）。ログインに失敗したスキームは注入せず警告ログに残るだけで、それを要求する operation は `SecurityResolver` の判定で個別に NG になる（Fire 全体は止めない）。
+
 ## 対象外（v1 のスコープ外）
 
 - 異常系（4xx/5xx を期待するテスト）は対象外。正常系のみ。
-- リクエストボディ・パラメータの値を仕様のスキーマから合成する機能は無い（example／override が無ければスキップ）。
+- リクエストボディ・パラメータの値を仕様のスキーマから合成する機能は無い（example／override が無ければ失敗（NG）扱い）。
 - `"2XX"` ワイルドカードや `"default"` のレスポンスキーは対象外（数値の 2xx キーのみ）。
 - フル JSON Schema 検証（`pattern` / `format` / 数値範囲 等）は対象外。
 - `sql` は PostgreSQL（Npgsql）・MySQL（MySqlConnector）のみ対応。
-- `startup.cmd` / override の `cmd` はシェルを経由しない直接 exec（パイプ・リダイレクト等の複雑なシェル構文は不可）。
+- `startup.cmd` / override の `cmd` / `auth.*.login` はシェルを経由しない直接 exec・直接 HTTP 送信（パイプ・リダイレクト等の複雑なシェル構文は不可）。
+- `auth.*.login` はリクエストボディが JSON 固定（`application/x-www-form-urlencoded` 等の OAuth2 トークンエンドポイントでよくある形式は非対応）。ログインは 1 回の HTTP 呼び出しで完結する前提（多段階認証・トークンのリフレッシュ等は非対応）。
+- `mutualTLS` 等、ヘッダ／クエリで表現できない認証方式は解決不可（常に NG）。
 
 ## エンジン
 
@@ -164,6 +193,9 @@ ai-harness-openapi-smoke/
     ├── BackendLauncher.cs      base_url の疎通確認・startup.cmd のフォールバック起動・停止
     ├── CmdRunner.cs            init/catch/final の cmd（順次実行）
     ├── SqlRunner.cs            init/catch/final の sql チェック（Npgsql / MySqlConnector）
+    ├── SecurityResolver.cs     仕様の security（認証要件）を現在のヘッダ/クエリが満たすかの判定
+    ├── AuthResolver.cs         auth.*.login のログイン実行とトークンの自動適用
+    ├── UrlBuilder.cs           base_url に対する絶対 URL の組み立て（operation・ログイン共通）
     ├── CommandLine.cs          コマンドライン文字列の簡易トークン分割（共有）
     ├── EnvExpand.cs            ${VAR_NAME} の環境変数展開
     ├── YamlJson.cs             YAML 汎用値 ⇔ JsonNode の変換

@@ -8,9 +8,9 @@ paths:
 ai-harness-openapi-smoke は hook では発火せず、`ai-harness-main --fire ai-harness-openapi-smoke` から
 手動起動する能動スキャン専用プラグイン。OpenAPI 仕様の各 operation（`paths` × method）へ実際に HTTP
 リクエストを送り、正常系（happy path）の疎通を確認する。値の優先順位は `overrides` > 仕様の
-`example`/`examples` > スキーマの `example`。解決できない必須項目がある operation は値を合成せず
-スキップする（失敗ではない）。判定はステータスコード（`expected_status` か仕様の最小 2xx）とレスポンス
-ボディの構造（`type`/`required`/`properties`/`items` の再帰照合のみ）。
+`example`/`examples` > スキーマの `example`。解決できない必須項目がある operation は値を合成せず、
+実リクエストを送らず**失敗（NG）**として報告する。判定はステータスコード（`expected_status` か仕様の
+最小 2xx）とレスポンスボディの構造（`type`/`required`/`properties`/`items` の再帰照合のみ）。
 
 - `spec` … OpenAPI 仕様（YAML/JSON・プロジェクトルート相対）
 - `base_url` … テスト対象バックエンドのベース URL
@@ -25,8 +25,21 @@ ai-harness-openapi-smoke は hook では発火せず、`ai-harness-main --fire a
 - `overrides[].path_params` / `query` / `headers` / `body` / `expected_status` … 仕様の example を上書き
 - `overrides[].init` / `catch` / `final` … `cmd`（順次実行）と `sql`（クエリ結果のアサーション）。
   `init` はリクエスト前（失敗なら実リクエストを送らず NG）、`catch` は失敗時のみ、`final` は常に実行
+- `auth.<schemeId>.login` … 仕様の `components.securitySchemes` のキー名ごとに、ログインリクエスト
+  （`method`/`path`/`headers`/`body`/`token_field`）を書く。得たトークンの適用先（`Authorization`
+  ヘッダか apiKey のヘッダ/クエリか）は仕様のスキーム定義から自動で導出する
+
+仕様の `security`（認証要件）も、パラメータ・リクエストボディと同様に「解決できなければ NG」の対象。
+`headers`（トップレベル/override）に認証情報が無く、該当スキームの `auth.<schemeId>.login` も無い／
+ログインに失敗した operation は、実リクエストを送らず「認証要件を満たせない」として NG になる。
 
 設定不正・仕様が読めない場合は exit 2（検出。hook のゲートではないためブロックではなくレポート）。
+
+`startup`（バックエンド自動起動）・`sql`（DB アサーション）・`auth`（ログイン）は Docker・DB・ログイン
+エンドポイント等の環境が手元に無いことを理由に省略・コメントアウトしてよい機能ではない。これらは
+「未実装」ではなく、この harness が正常系を実際に確認するための正式な機能。使うと判断したら、Docker
+の起動・DB の用意・ログイン情報の設定まで含めて実際に動く状態に仕上げること。環境構築自体が難しい／
+ユーザー判断が要るときは、省略して黙ってコメントアウトするのではなく、その旨をユーザーに確認する。
 
 ## 設定ファイル
 
@@ -48,6 +61,13 @@ sql:
   database: myapp_test
   username: postgres
   password: "${DB_PASSWORD}"
+
+auth:
+  bearerAuth:                    # 仕様の components.securitySchemes のキー名
+    login:
+      path: /auth/login
+      body: { username: tester, password: "${TEST_PASSWORD}" }
+      token_field: data.access_token
 
 overrides:
   - method: GET

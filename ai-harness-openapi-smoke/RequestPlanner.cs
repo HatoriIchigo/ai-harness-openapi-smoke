@@ -16,21 +16,24 @@ public sealed record RequestPlan(
 /// <summary>
 /// OpenAPI の 1 operation から、実際に投げるリクエストを組み立てる。
 /// 値の優先順位は override（<see cref="OverrideEntry"/>） &gt; 仕様の example &gt; スキーマの example。
-/// 必須パラメータ／必須リクエストボディ／2xx レスポンス定義のいずれかが解決できない operation はスキップする
-/// （正常系のみを対象とするため、値を合成しない）。
+/// 必須パラメータ／必須リクエストボディ／2xx レスポンス定義／<c>security</c>（認証要件）のいずれかが
+/// 解決できない operation は値を合成せず、呼び出し側で失敗（NG）として扱う（戻り値の <c>Error</c> に理由を返す）。
+/// 認証情報そのものは合成しない（<c>headers</c>／<c>overrides[].headers</c> 等で用意されているかを見るのみ）。
 /// </summary>
 public static class RequestPlanner
 {
-    public static (RequestPlan? Plan, string? SkipReason) Build(
+    public static (RequestPlan? Plan, string? Error) Build(
         string pathKey,
         HttpMethod method,
         IEnumerable<IOpenApiParameter> pathItemParameters,
         OpenApiOperation operation,
+        IReadOnlyList<OpenApiSecurityRequirement> documentSecurity,
         OverrideEntry? overrideEntry,
-        IReadOnlyDictionary<string, string> defaultHeaders)
+        IReadOnlyDictionary<string, string> defaultHeaders,
+        IReadOnlyDictionary<string, string>? defaultQuery = null)
     {
         var pathParams = new Dictionary<string, string>();
-        var query = new Dictionary<string, string>();
+        var query = new Dictionary<string, string>(defaultQuery ?? new Dictionary<string, string>());
         var headers = new Dictionary<string, string>(defaultHeaders, StringComparer.OrdinalIgnoreCase);
 
         // operation 側のパラメータが同名の path アイテム側を上書きする。
@@ -93,6 +96,15 @@ public static class RequestPlanner
             {
                 headers[k] = v;
             }
+        }
+
+        // operation.Security が非 null なら document 側の既定を完全に上書きする（null は「未指定＝継承」、
+        // 空配列は「明示的に認証不要」で SecurityResolver.Check がそのまま満たす）。
+        var effectiveSecurity = (operation.Security as IReadOnlyList<OpenApiSecurityRequirement>) ?? documentSecurity;
+        var (securitySatisfied, missingSecurity) = SecurityResolver.Check(effectiveSecurity, headers, query);
+        if (!securitySatisfied)
+        {
+            return (null, $"認証要件を満たせない: {missingSecurity}（headers に認証情報を設定してください）");
         }
 
         JsonNode? body = null;

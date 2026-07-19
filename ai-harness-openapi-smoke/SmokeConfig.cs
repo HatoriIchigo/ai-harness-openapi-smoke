@@ -30,6 +30,16 @@ public sealed record StartupConfig(IReadOnlyList<string> Cmd, int WaitSeconds, s
 public sealed record SqlConnectionConfig(string Driver, string Host, int Port, string Database, string Username, string Password);
 
 /// <summary>
+/// OpenAPI 仕様の <c>security</c>（<see cref="SecurityResolver"/>）を満たすため、認証スキーム 1 件分の
+/// ログイン方法を定義する。<see cref="TokenField"/> はレスポンス JSON からトークンを取り出すパス
+/// （ドット区切りでネスト可。例: <c>data.access_token</c>）。取得したトークンをどこへ適用するか
+/// （<c>Authorization</c> ヘッダ／apiKey のヘッダ・クエリ）は、仕様の <c>components.securitySchemes</c>
+/// から <see cref="AuthResolver"/> が自動判断する（ここでは指定しない）。
+/// </summary>
+public sealed record AuthLoginConfig(
+    string Method, string Path, IReadOnlyDictionary<string, string> Headers, JsonNode? Body, string TokenField);
+
+/// <summary>
 /// override 1 件。<see cref="Method"/>／<see cref="Path"/>（OpenAPI 仕様のパステンプレートそのまま、例: <c>/users/{id}</c>）
 /// で該当 operation に紐付ける。<see cref="Body"/> が非 null なら仕様の example より優先する。
 ///
@@ -76,6 +86,14 @@ public sealed record OverrideEntry(
 ///   username: postgres
 ///   password: "${DB_PASSWORD}"        # ${VAR_NAME} で環境変数参照。リテラルでも可
 ///
+/// auth:                               # 仕様の security（認証要件）を満たすためのログイン方法（省略可）
+///   bearerAuth:                       # 仕様の components.securitySchemes のキー名と一致させる
+///     login:
+///       method: POST                  # 省略可・既定 POST
+///       path: /auth/login             # base_url からの相対パス
+///       body: { username: tester, password: "${TEST_PASSWORD}" }
+///       token_field: access_token     # レスポンス JSON からトークンを取り出すパス（ドット区切り可）
+///
 /// overrides:                         # example が無い／上書きしたい operation の指定（省略可）
 ///   - method: GET
 ///     path: /users/{id}              # 仕様の paths キーと method+path で一致させる
@@ -100,6 +118,7 @@ public sealed class SmokeConfig
     public int TimeoutSeconds { get; }
     public StartupConfig? Startup { get; }
     public SqlConnectionConfig? SqlConnection { get; }
+    public IReadOnlyDictionary<string, AuthLoginConfig> Auth { get; }
     public IReadOnlyList<OverrideEntry> Overrides { get; }
     public IReadOnlyList<string> Errors { get; }
 
@@ -109,10 +128,11 @@ public sealed class SmokeConfig
     private const int DefaultTimeoutSeconds = 10;
     private const int DefaultPostgresPort = 5432;
     private const int DefaultMySqlPort = 3306;
+    private const string DefaultAuthLoginMethod = "POST";
 
     private SmokeConfig(
         string spec, string baseUrl, IReadOnlyDictionary<string, string> headers, int timeoutSeconds,
-        StartupConfig? startup, SqlConnectionConfig? sqlConnection,
+        StartupConfig? startup, SqlConnectionConfig? sqlConnection, IReadOnlyDictionary<string, AuthLoginConfig> auth,
         IReadOnlyList<OverrideEntry> overrides, IReadOnlyList<string> errors)
     {
         Spec = spec;
@@ -121,6 +141,7 @@ public sealed class SmokeConfig
         TimeoutSeconds = timeoutSeconds;
         Startup = startup;
         SqlConnection = sqlConnection;
+        Auth = auth;
         Overrides = overrides;
         Errors = errors;
     }
@@ -141,6 +162,7 @@ public sealed class SmokeConfig
         var timeoutSeconds = GetOptionalPositiveInt(config, "timeout_seconds", DefaultTimeoutSeconds, errors);
         var startup = ParseStartup(config, errors);
         var sqlConnection = ParseSqlConnection(config, errors);
+        var auth = ParseAuth(config, errors);
 
         var overrides = new List<OverrideEntry>();
         if (config.TryGetValue("overrides", out var overridesRaw) && overridesRaw is not null)
@@ -166,7 +188,65 @@ public sealed class SmokeConfig
         }
 
         return new SmokeConfig(
-            spec ?? "", baseUrl ?? "", headers, timeoutSeconds, startup, sqlConnection, overrides, errors);
+            spec ?? "", baseUrl ?? "", headers, timeoutSeconds, startup, sqlConnection, auth, overrides, errors);
+    }
+
+    private static IReadOnlyDictionary<string, AuthLoginConfig> ParseAuth(
+        IReadOnlyDictionary<string, object> config, List<string> errors)
+    {
+        var result = new Dictionary<string, AuthLoginConfig>();
+        if (!config.TryGetValue("auth", out var raw) || raw is null)
+        {
+            return result;
+        }
+        if (raw is not IDictionary schemesMap)
+        {
+            errors.Add("auth はマップである必要があります。");
+            return result;
+        }
+
+        foreach (DictionaryEntry entry in schemesMap)
+        {
+            var schemeId = entry.Key?.ToString();
+            if (string.IsNullOrWhiteSpace(schemeId))
+            {
+                continue;
+            }
+            var label = $"auth.{schemeId}";
+            if (entry.Value is not IDictionary schemeMap)
+            {
+                errors.Add($"{label} はマップである必要があります。");
+                continue;
+            }
+            if (schemeMap["login"] is not IDictionary loginMap)
+            {
+                errors.Add($"{label}.login が未設定、またはマップではありません。");
+                continue;
+            }
+
+            var loginLabel = $"{label}.login";
+            var method = loginMap.Contains("method")
+                ? GetScalar(loginMap, "method", loginLabel, errors)?.ToUpperInvariant()
+                : DefaultAuthLoginMethod;
+            var path = GetScalar(loginMap, "path", loginLabel, errors);
+            var tokenField = GetScalar(loginMap, "token_field", loginLabel, errors);
+            var loginHeaders = GetOptionalStringMap(loginMap, "headers", $"{loginLabel}.headers", errors);
+            var body = loginMap.Contains("body") ? YamlJson.ToJsonNode(loginMap["body"]) : null;
+
+            if (method is null || path is null || tokenField is null)
+            {
+                continue; // 個別のエラーは既に記録済み。
+            }
+            if (!path.StartsWith('/'))
+            {
+                errors.Add($"{loginLabel}.path は '/' で始まる必要があります: '{path}'");
+                continue;
+            }
+
+            result[schemeId] = new AuthLoginConfig(method, path, loginHeaders, body, tokenField);
+        }
+
+        return result;
     }
 
     private static StartupConfig? ParseStartup(IReadOnlyDictionary<string, object> config, List<string> errors)
