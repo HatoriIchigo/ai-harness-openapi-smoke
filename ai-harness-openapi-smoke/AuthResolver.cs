@@ -20,7 +20,8 @@ public static class AuthResolver
 {
     public static AuthResolveResult ResolveAll(
         HttpClient http, string baseUrl, OpenApiComponents? components,
-        IReadOnlyDictionary<string, AuthLoginConfig> authConfigs)
+        IReadOnlyDictionary<string, AuthLoginConfig> authConfigs,
+        IReadOnlyDictionary<string, string> topLevelHeaders)
     {
         var headers = new Dictionary<string, string>();
         var query = new Dictionary<string, string>();
@@ -34,7 +35,7 @@ public static class AuthResolver
                 continue;
             }
 
-            var (token, error) = Login(http, baseUrl, loginConfig);
+            var (token, error) = Login(http, baseUrl, loginConfig, topLevelHeaders);
             if (error is not null)
             {
                 logs.Add(
@@ -69,7 +70,8 @@ public static class AuthResolver
         return new AuthResolveResult(headers, query, logs);
     }
 
-    private static (string? Token, string? Error) Login(HttpClient http, string baseUrl, AuthLoginConfig config)
+    private static (string? Token, string? Error) Login(
+        HttpClient http, string baseUrl, AuthLoginConfig config, IReadOnlyDictionary<string, string> topLevelHeaders)
     {
         var (uri, uriError) = UrlBuilder.Build(
             baseUrl, config.Path, new Dictionary<string, string>(), new Dictionary<string, string>());
@@ -78,8 +80,16 @@ public static class AuthResolver
             return (null, uriError);
         }
 
-        using var request = new HttpRequestMessage(new HttpMethod(config.Method), uri);
+        // トップレベル headers が既定（ベース）で、login 固有の headers があればそちらを優先する
+        // （RequestPlanner が override 側で defaultHeaders を上書きするのと同じ優先順位）。
+        var mergedHeaders = new Dictionary<string, string>(topLevelHeaders, StringComparer.OrdinalIgnoreCase);
         foreach (var (name, value) in config.Headers)
+        {
+            mergedHeaders[name] = value;
+        }
+
+        using var request = new HttpRequestMessage(new HttpMethod(config.Method), uri);
+        foreach (var (name, value) in mergedHeaders)
         {
             request.Headers.TryAddWithoutValidation(name, value);
         }

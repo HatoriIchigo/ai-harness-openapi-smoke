@@ -80,7 +80,7 @@ public sealed class OpenApiSmokePlugin : PluginBase
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(config.TimeoutSeconds) };
 
-        var auth = AuthResolver.ResolveAll(http, config.BaseUrl, spec.Document.Components, config.Auth);
+        var auth = AuthResolver.ResolveAll(http, config.BaseUrl, spec.Document.Components, config.Auth, config.Headers);
         foreach (var log in auth.Logs)
         {
             yield return LogEntry.Info(log);

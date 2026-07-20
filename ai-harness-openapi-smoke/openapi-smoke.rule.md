@@ -14,7 +14,7 @@ ai-harness-openapi-smoke は hook では発火せず、`ai-harness-main --fire a
 
 - `spec` … OpenAPI 仕様（YAML/JSON・プロジェクトルート相対）
 - `base_url` … テスト対象バックエンドのベース URL
-- `headers` … 全リクエスト共通ヘッダ（省略可）
+- `headers` … 全リクエスト共通ヘッダ（省略可。適用順序は下記「ヘッダの適用順序」参照）
 - `timeout_seconds` … リクエストタイムアウト秒（省略可・既定 10）
 - `startup.cmd` / `startup.wait` / `startup.cwd` … `base_url` 無応答時だけ使うフォールバック起動
   （先頭から順に試し、`wait` 秒生存すれば採用）。既に応答していれば実行も停止もしない
@@ -29,9 +29,26 @@ ai-harness-openapi-smoke は hook では発火せず、`ai-harness-main --fire a
   （`method`/`path`/`headers`/`body`/`token_field`）を書く。得たトークンの適用先（`Authorization`
   ヘッダか apiKey のヘッダ/クエリか）は仕様のスキーム定義から自動で導出する
 
+### ヘッダの適用順序
+
+送信する全リクエストのヘッダは、後勝ち（後述のものが先のものを上書き）で以下の順に重なる。
+
+1. `auth.<schemeId>.login` で得たトークンの自動適用（`Authorization` ヘッダ、または apiKey スキームの
+   ヘッダ/クエリ）。仕様の `components.securitySchemes` にスキームが無い、またはログイン自体が失敗した
+   場合はこの層は乗らない
+2. トップレベル `headers`（全リクエスト共通）
+3. `overrides[].headers`（該当 operation のみ・仕様の example を上書き）
+
+`auth.<schemeId>.login` 自体が送るログインリクエストにも、通常の operation と同じくトップレベル
+`headers` が基底として適用される。`auth.<schemeId>.login.headers` を設定した場合はそちらが優先
+（ログインリクエスト限定の 2. → `login.headers` という上書き）。全 operation がヘッダ経由の認証
+（apiKey 等）を必須とする仕様では、トップレベル `headers` にその値を置かないとログインリクエスト自体が
+拒否され `auth.<schemeId>.login` が常に失敗する。
+
 仕様の `security`（認証要件）も、パラメータ・リクエストボディと同様に「解決できなければ NG」の対象。
-`headers`（トップレベル/override）に認証情報が無く、該当スキームの `auth.<schemeId>.login` も無い／
-ログインに失敗した operation は、実リクエストを送らず「認証要件を満たせない」として NG になる。
+上記の適用順序を経て最終的に解決済みの `headers`/`query` に、該当スキームの認証情報（`Authorization`
+ヘッダ、または apiKey のヘッダ/クエリ）が無い operation は、実リクエストを送らず「認証要件を満たせない」
+として NG になる。
 
 設定不正・仕様が読めない場合は exit 2（検出。hook のゲートではないためブロックではなくレポート）。
 

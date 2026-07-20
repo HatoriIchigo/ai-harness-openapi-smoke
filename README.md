@@ -120,7 +120,7 @@ auth:
     login:
       method: POST                 # 省略可・既定 POST
       path: /auth/login            # base_url からの相対パス
-      headers: {}                  # 省略可。ログインリクエスト自体に付けるヘッダ
+      headers: {}                  # 省略可。ログインリクエスト自体に付けるヘッダ（トップレベル headers がベースで、こちらが上書き）
       body:
         username: tester
         password: "${TEST_PASSWORD}"
